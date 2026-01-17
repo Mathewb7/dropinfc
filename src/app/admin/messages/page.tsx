@@ -11,19 +11,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Loader2, Copy, CheckCircle, MessageSquare } from 'lucide-react'
-import { formatGameDate, formatTime } from '@/lib/utils'
+import { Loader2, Copy, CheckCircle } from 'lucide-react'
+import { formatGameDate } from '@/lib/utils'
 import { GAME_CONFIG } from '@/lib/constants'
 import { useToast } from '@/hooks/use-toast'
 
-type MessageType = 'priority' | 'spots_available' | 'spot_reopened' | 'payment_reminder' | 'teams'
+type MessageType = 'priority' | 'spots_available' | 'payment_reminder'
 
 const CONFIRMED_STATUSES = ['priority_confirmed', 'lottery_selected', 'confirmed'] as const
-
-function filterByTeam<T extends { team?: string | null }>(players: T[], team: 'dark' | 'light'): T[] {
-  return players.filter(p => p.team === team)
-}
 
 export default function MessagesPage() {
   const { game, players, loading } = useGame()
@@ -55,9 +50,6 @@ export default function MessagesPage() {
     p => CONFIRMED_STATUSES.includes(p.status as typeof CONFIRMED_STATUSES[number]) && p.payment_status === 'pending'
   )
 
-  const darkTeam = filterByTeam(players, 'dark')
-  const lightTeam = filterByTeam(players, 'light')
-
   function generateMessage(): string {
     const gameDate = formatGameDate(game.game_date)
     const gameTime = GAME_CONFIG.START_TIME
@@ -71,7 +63,7 @@ ${priorityMentions}
 
 You've been selected for priority registration! ⚽
 
-Please confirm your attendance by ${formatTime(game.priority_deadline)} (Thursday 12pm).
+Please confirm your attendance by Thursday night at 12am (midnight).
 
 Reply with:
 ✅ IN - I'm playing
@@ -83,7 +75,7 @@ Game Details:
 📍 ${GAME_CONFIG.LOCATION}
 💰 $${GAME_CONFIG.PAYMENT_AMOUNT}
 
-If you decline or don't respond by the deadline, your spot opens to the waitlist.
+If you decline or don't respond by the deadline, your spot opens to everyone else.
 
 See you on the pitch! ⚽🔥`
 
@@ -95,7 +87,7 @@ See you on the pitch! ⚽🔥`
         const availableCount = 16 - confirmedPlayers.length
         return `⚡ *SPOTS AVAILABLE NOW - ${gameDate}*
 
-🎉 ${availableCount} spot(s) just opened up!
+🎉 ${availableCount} spot(s) available for the next game!
 
 First come, first served! Click the link to join:
 👉 https://dropin-fc.app/dashboard
@@ -106,27 +98,9 @@ Game Details:
 📍 ${GAME_CONFIG.LOCATION}
 💰 $${GAME_CONFIG.PAYMENT_AMOUNT}
 
-Payment due by ${formatTime(game.payment_deadline)} (Saturday 11:59pm)
+Payment due by Saturday night at 12am (midnight)
 
 Spots fill up FAST - don't wait! ⚽🔥`
-
-      case 'spot_reopened':
-        return `🔓 *SPOT REOPENED - ${gameDate}*
-
-1 spot just became available due to non-payment!
-
-First come, first served! Click to join NOW:
-👉 https://dropin-fc.app/dashboard
-
-Game Details:
-📅 ${gameDate}
-⏰ ${gameTime}
-📍 ${GAME_CONFIG.LOCATION}
-💰 $${GAME_CONFIG.PAYMENT_AMOUNT}
-
-Payment due by ${formatTime(game.payment_deadline)} (Saturday 11:59pm)
-
-Don't miss out! ⚽`
 
       case 'payment_reminder':
         const unpaidMentions = unpaidPlayers.map((p) => `@${p.player.whatsapp_name}`).join(' ')
@@ -134,44 +108,13 @@ Don't miss out! ⚽`
 
 ${unpaidMentions}
 
-Friendly reminder: Payment deadline is ${formatTime(game.payment_deadline)} (Saturday 11:59pm)
+Friendly reminder: Payment deadline is Saturday night at 12am (midnight).
 
 Please send $${GAME_CONFIG.PAYMENT_AMOUNT} via e-transfer to [payment email]
 
-If payment isn't received by the deadline, your spot will be given to the next player on the waitlist.
+If payment isn't received by the deadline, your spot will be opened up for everyone else.
 
 Thanks! ⚽`
-
-      case 'teams':
-        if (!game.teams_announced) {
-          return 'Teams have not been announced yet.'
-        }
-
-        const darkKeeper = darkTeam.find(p => p.position === 'keeper' && p.is_starting)
-        const darkField = darkTeam.filter(p => p.position === 'field' && p.is_starting)
-        const darkSubs = darkTeam.filter(p => !p.is_starting)
-
-        const lightKeeper = lightTeam.find(p => p.position === 'keeper' && p.is_starting)
-        const lightField = lightTeam.filter(p => p.position === 'field' && p.is_starting)
-        const lightSubs = lightTeam.filter(p => !p.is_starting)
-
-        return `⚽ *TEAM LINEUPS - ${gameDate}*
-
-📅 ${gameDate}
-⏰ ${gameTime}
-📍 ${GAME_CONFIG.LOCATION}
-
-*🖤 DARK TEAM*
-🧤 Keeper: @${darkKeeper?.player.whatsapp_name || 'TBD'}
-⚽ Field: ${darkField.map((p) => `@${p.player.whatsapp_name}`).join(', ')}
-🔄 Subs: ${darkSubs.map((p) => `@${p.player.whatsapp_name}`).join(', ')}
-
-*🤍 LIGHT TEAM*
-🧤 Keeper: @${lightKeeper?.player.whatsapp_name || 'TBD'}
-⚽ Field: ${lightField.map((p) => `@${p.player.whatsapp_name}`).join(', ')}
-🔄 Subs: ${lightSubs.map((p) => `@${p.player.whatsapp_name}`).join(', ')}
-
-Let's have a great game! 🔥⚽`
 
       default:
         return ''
@@ -188,27 +131,6 @@ Let's have a great game! 🔥⚽`
       description: "Message copied to clipboard. Ready to paste in WhatsApp.",
     })
     setTimeout(() => setCopied(false), 2000)
-  }
-
-  const canGenerateMessage = () => {
-    switch (messageType) {
-      case 'priority':
-        return priorityPlayers.length > 0
-      case 'spots_available':
-        const confirmedCount = players.filter(p =>
-          CONFIRMED_STATUSES.includes(p.status as typeof CONFIRMED_STATUSES[number]) &&
-          (p.payment_status === 'pending' || p.payment_status === 'marked_paid' || p.payment_status === 'verified')
-        ).length
-        return confirmedCount < 16 // Can generate if spots are available
-      case 'spot_reopened':
-        return true // Always available as a template
-      case 'payment_reminder':
-        return unpaidPlayers.length > 0
-      case 'teams':
-        return game.teams_announced && darkTeam.length > 0 && lightTeam.length > 0
-      default:
-        return false
-    }
   }
 
   return (
@@ -239,60 +161,43 @@ Let's have a great game! 🔥⚽`
                   (p.payment_status === 'pending' || p.payment_status === 'marked_paid' || p.payment_status === 'verified')
                 ).length} open)
               </SelectItem>
-              <SelectItem value="spot_reopened">
-                Spot Reopened (after non-payment)
-              </SelectItem>
               <SelectItem value="payment_reminder">
                 Payment Reminder ({unpaidPlayers.length} unpaid)
               </SelectItem>
-              <SelectItem value="teams">Team Announcement</SelectItem>
             </SelectContent>
           </Select>
         </CardContent>
       </Card>
 
       {/* Generated Message */}
-      {canGenerateMessage() ? (
-        <Card>
-          <CardHeader>
-            <div className="flex justify-between items-start">
-              <div>
-                <CardTitle>Generated Message</CardTitle>
-                <CardDescription>Copy and paste into WhatsApp group</CardDescription>
-              </div>
-              <Button onClick={handleCopy} variant="outline" size="sm">
-                {copied ? (
-                  <>
-                    <CheckCircle className="h-4 w-4 mr-2" />
-                    Copied!
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-4 w-4 mr-2" />
-                    Copy
-                  </>
-                )}
-              </Button>
+      <Card>
+        <CardHeader>
+          <div className="flex justify-between items-start">
+            <div>
+              <CardTitle>Generated Message</CardTitle>
+              <CardDescription>Copy and paste into WhatsApp group</CardDescription>
             </div>
-          </CardHeader>
-          <CardContent>
-            <div className="bg-gray-50 p-4 rounded-lg">
-              <pre className="whitespace-pre-wrap font-sans text-sm">{message}</pre>
-            </div>
-          </CardContent>
-        </Card>
-      ) : (
-        <Alert>
-          <MessageSquare className="h-4 w-4" />
-          <AlertDescription>
-            {messageType === 'priority' && 'No priority players invited yet.'}
-            {messageType === 'spots_available' && 'Game is full (16/16 players)!'}
-            {messageType === 'spot_reopened' && 'Template available - use after removing non-payers.'}
-            {messageType === 'payment_reminder' && 'All players have paid!'}
-            {messageType === 'teams' && 'Teams have not been announced yet.'}
-          </AlertDescription>
-        </Alert>
-      )}
+            <Button onClick={handleCopy} variant="outline" size="sm">
+              {copied ? (
+                <>
+                  <CheckCircle className="h-4 w-4 mr-2" />
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <Copy className="h-4 w-4 mr-2" />
+                  Copy
+                </>
+              )}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="bg-gray-50 p-4 rounded-lg">
+            <pre className="whitespace-pre-wrap font-sans text-sm">{message}</pre>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Instructions */}
       <Card>

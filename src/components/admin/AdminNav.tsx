@@ -28,9 +28,9 @@ const navItems: NavItem[] = [
     icon: LayoutDashboard,
   },
   {
-    name: 'Players',
-    href: '/admin/players',
-    icon: Users,
+    name: 'Messages',
+    href: '/admin/messages',
+    icon: MessageSquare,
   },
   {
     name: 'Payments',
@@ -38,9 +38,9 @@ const navItems: NavItem[] = [
     icon: DollarSign,
   },
   {
-    name: 'Messages',
-    href: '/admin/messages',
-    icon: MessageSquare,
+    name: 'Players',
+    href: '/admin/players',
+    icon: Users,
   },
   {
     name: 'Refunds',
