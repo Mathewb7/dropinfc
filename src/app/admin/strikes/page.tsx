@@ -62,9 +62,24 @@ export default function StrikesPage() {
         .select('*')
         .order('id', { ascending: false })
         .limit(1)
-        .single()
+        .maybeSingle()
 
       if (fetchError) throw fetchError
+
+      if (!data) {
+        // No settings exist - create default settings
+        const { data: newSettings, error: insertError } = await supabase
+          .from('strike_settings')
+          .insert({ strikes_before_cooldown: 3, cooldown_weeks: 3 })
+          .select()
+          .single()
+
+        if (insertError) throw insertError
+        setSettings(newSettings)
+        setStrikesBeforeCooldown(newSettings.strikes_before_cooldown)
+        setCooldownWeeks(newSettings.cooldown_weeks)
+        return
+      }
 
       setSettings(data)
       setStrikesBeforeCooldown(data.strikes_before_cooldown)

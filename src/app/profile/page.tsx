@@ -22,12 +22,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Loader2, Save, DollarSign, HandCoins, Camera } from 'lucide-react'
+import { Loader2, Save, DollarSign, HandCoins, Camera, Trash2 } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import { CreditTransaction } from '@/types/database'
 import { useToast } from '@/hooks/use-toast'
 import { uploadProfilePicture } from '@/lib/uploadProfilePicture'
-import Image from 'next/image'
 
 export default function ProfilePage() {
   const { user, loading: authLoading } = useRequireAuth()
@@ -41,6 +40,7 @@ export default function ProfilePage() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
   const [uploadingImage, setUploadingImage] = useState(false)
+  const [deletingImage, setDeletingImage] = useState(false)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const [transactions, setTransactions] = useState<CreditTransaction[]>([])
   const [transactionsLoading, setTransactionsLoading] = useState(true)
@@ -105,6 +105,43 @@ export default function ProfilePage() {
       setImagePreview(null)
     } finally {
       setUploadingImage(false)
+    }
+  }
+
+  // Handle profile picture deletion
+  const handleDeleteProfilePicture = async () => {
+    if (!user || !profile?.profile_picture_url) return
+
+    setDeletingImage(true)
+    setError(null)
+
+    try {
+      // Extract file path from URL
+      const url = new URL(profile.profile_picture_url)
+      const pathParts = url.pathname.split('/storage/v1/object/public/profile-pictures/')
+      if (pathParts.length > 1) {
+        const filePath = pathParts[1]
+        // Delete from storage
+        await supabase.storage.from('profile-pictures').remove([filePath])
+      }
+
+      // Update profile to remove picture URL
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ profile_picture_url: null })
+        .eq('id', user.id)
+
+      if (updateError) throw updateError
+
+      await refreshProfile()
+      toast({
+        title: "Profile Picture Deleted",
+        description: "Your profile picture has been removed.",
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete profile picture')
+    } finally {
+      setDeletingImage(false)
     }
   }
 
@@ -237,48 +274,56 @@ export default function ProfilePage() {
           <CardContent className="space-y-4">
             {/* Profile Picture */}
             <div className="flex flex-col items-center gap-4 pb-4 border-b">
-              <div className="relative">
+              <div className="relative w-[120px] h-[120px] rounded-full overflow-hidden bg-gray-200 border-2 border-gray-200 flex items-center justify-center">
                 {imagePreview || profile?.profile_picture_url ? (
-                  <Image
+                  <img
                     src={imagePreview || profile?.profile_picture_url || ''}
                     alt="Profile"
-                    width={120}
-                    height={120}
-                    className="rounded-full object-cover"
+                    className="w-full h-full object-cover"
                   />
                 ) : (
-                  <div className="w-[120px] h-[120px] rounded-full bg-gray-200 flex items-center justify-center">
-                    <Camera className="h-12 w-12 text-gray-400" />
-                  </div>
+                  <Camera className="h-12 w-12 text-gray-400" />
                 )}
-                {uploadingImage && (
+                {(uploadingImage || deletingImage) && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 rounded-full">
                     <Loader2 className="h-8 w-8 animate-spin text-white" />
                   </div>
                 )}
               </div>
-              <div>
+              <div className="flex flex-col items-center gap-2">
                 <input
                   type="file"
                   id="profile-picture"
                   accept="image/jpeg,image/jpg,image/png,image/webp"
                   className="hidden"
                   onChange={handleProfilePictureChange}
-                  disabled={uploadingImage}
+                  disabled={uploadingImage || deletingImage}
                 />
-                <Label htmlFor="profile-picture">
+                <div className="flex gap-2">
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    disabled={uploadingImage}
+                    disabled={uploadingImage || deletingImage}
                     onClick={() => document.getElementById('profile-picture')?.click()}
                   >
                     <Camera className="h-4 w-4 mr-2" />
-                    {profile?.profile_picture_url ? 'Change Picture' : 'Upload Picture'}
+                    {profile?.profile_picture_url ? 'Change' : 'Upload'}
                   </Button>
-                </Label>
-                <p className="text-xs text-gray-500 mt-1 text-center">
+                  {profile?.profile_picture_url && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={uploadingImage || deletingImage}
+                      onClick={handleDeleteProfilePicture}
+                      className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 text-center">
                   JPG, PNG or WebP (max 5MB)
                 </p>
               </div>

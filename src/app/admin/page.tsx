@@ -27,10 +27,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Loader2, Calendar, Users, DollarSign, AlertTriangle, CheckCircle, Shuffle, Download, XCircle } from 'lucide-react'
+import { Loader2, Calendar, Users, DollarSign, AlertTriangle, CheckCircle, Shuffle, Share2, XCircle } from 'lucide-react'
 import { formatGameDate, formatTime, timeUntil } from '@/lib/utils'
 import { GAME_CONFIG, TEAM_COLORS } from '@/lib/constants'
-import { toPng } from 'html-to-image'
+import { toJpeg } from 'html-to-image'
 import Link from 'next/link'
 
 interface TeamAssignment {
@@ -391,18 +391,39 @@ export default function AdminDashboard() {
 
     setGeneratingLineup(true)
     try {
-      const dataUrl = await toPng(lineupRef.current, {
-        quality: 1.0,
+      const dataUrl = await toJpeg(lineupRef.current, {
+        quality: 0.95,
         pixelRatio: 2,
+        backgroundColor: '#166534',
       })
 
-      const link = document.createElement('a')
-      link.download = `dropin-fc-lineup-${formatGameDate(game.game_date)}.png`
-      link.href = dataUrl
-      link.click()
-      setSuccess('Lineup downloaded successfully!')
+      const filename = `dropin-fc-lineup-${formatGameDate(game.game_date)}.jpg`
+
+      // Convert data URL to Blob for sharing
+      const response = await fetch(dataUrl)
+      const blob = await response.blob()
+      const file = new File([blob], filename, { type: 'image/jpeg' })
+
+      // Check if Web Share API is available and supports file sharing (mobile)
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: 'DropIn FC Lineup',
+          text: `Lineup for ${formatGameDate(game.game_date)}`,
+        })
+      } else {
+        // Fallback to download for desktop browsers
+        const link = document.createElement('a')
+        link.download = filename
+        link.href = dataUrl
+        link.click()
+      }
     } catch (err) {
-      console.error('Failed to generate image:', err)
+      // User cancelled share dialog - not an error
+      if (err instanceof Error && err.name === 'AbortError') {
+        return
+      }
+      console.error('Failed to generate/share image:', err)
       setLocalError('Failed to generate lineup image')
     } finally {
       setGeneratingLineup(false)
@@ -540,6 +561,25 @@ export default function AdminDashboard() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {/* Download Lineup Button - shown when teams announced */}
+          {game.teams_announced && (
+            <div className="pb-4 border-b">
+              <Button onClick={handleDownloadLineup} disabled={generatingLineup} className="w-full" size="lg">
+                {generatingLineup ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Generating Image...
+                  </>
+                ) : (
+                  <>
+                    <Share2 className="h-4 w-4 mr-2" />
+                    Share Lineup
+                  </>
+                )}
+              </Button>
+            </div>
+          )}
+
           {/* Player Stats */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-lg">
@@ -782,25 +822,22 @@ export default function AdminDashboard() {
         </Alert>
       )}
 
-      {/* Spot Availability Counter */}
-      {availableSpots > 0 ? (
-        <Alert>
-          <AlertDescription>
-            <strong>{availableSpots}</strong> spot(s) available for FCFS registration ({filledSpots}/{GAME_CONFIG.TOTAL_PLAYERS} filled)
-          </AlertDescription>
-        </Alert>
-      ) : filledSpots === GAME_CONFIG.TOTAL_PLAYERS ? (
-        <Alert>
-          <CheckCircle className="h-4 w-4" />
-          <AlertDescription>Game is full ({GAME_CONFIG.TOTAL_PLAYERS}/{GAME_CONFIG.TOTAL_PLAYERS} players)</AlertDescription>
-        </Alert>
-      ) : (
-        <Alert>
-          <AlertDescription>
-            Need {GAME_CONFIG.TOTAL_PLAYERS} confirmed and paid players to generate teams. Currently have{' '}
-            {confirmedPaidPlayers.length}.
-          </AlertDescription>
-        </Alert>
+      {/* Spot Availability Counter - hide when teams announced */}
+      {!game.teams_announced && (
+        availableSpots > 0 ? (
+          <Alert>
+            <AlertDescription>
+              <strong>{availableSpots}</strong> spot(s) available for FCFS registration ({filledSpots}/{GAME_CONFIG.TOTAL_PLAYERS} filled)
+            </AlertDescription>
+          </Alert>
+        ) : filledSpots < GAME_CONFIG.TOTAL_PLAYERS ? (
+          <Alert>
+            <AlertDescription>
+              Need {GAME_CONFIG.TOTAL_PLAYERS} confirmed and paid players to generate teams. Currently have{' '}
+              {confirmedPaidPlayers.length}.
+            </AlertDescription>
+          </Alert>
+        ) : null
       )}
 
       {/* Team Generation */}
@@ -977,33 +1014,10 @@ export default function AdminDashboard() {
         </>
       )}
 
-      {/* Lineup Download */}
+      {/* Hidden Lineup for Export - positioned off-screen so html-to-image can render it */}
       {game.teams_announced && (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Download Lineup</CardTitle>
-              <CardDescription>Generate and download lineup image as PNG for WhatsApp</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button onClick={handleDownloadLineup} disabled={generatingLineup} className="w-full">
-                {generatingLineup ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Generating Image...
-                  </>
-                ) : (
-                  <>
-                    <Download className="h-4 w-4 mr-2" />
-                    Download Lineup Image
-                  </>
-                )}
-              </Button>
-            </CardContent>
-          </Card>
-
-          {/* Hidden Lineup for Export */}
-          <div className="hidden">
+          <div className="fixed left-[-9999px] top-0">
             <div ref={lineupRef} className="bg-gradient-to-br from-green-600 to-green-800 p-8" style={{ width: '800px' }}>
               {/* Header */}
               <div className="text-center mb-8">
@@ -1093,14 +1107,6 @@ export default function AdminDashboard() {
             </div>
           </div>
         </>
-      )}
-
-      {/* Warnings */}
-      {game.teams_announced && teams.length === 0 && (
-        <Alert>
-          <CheckCircle className="h-4 w-4" />
-          <AlertDescription>Teams have already been announced for this game.</AlertDescription>
-        </Alert>
       )}
 
       {/* Cancel Game Confirmation Dialog */}

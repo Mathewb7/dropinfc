@@ -39,6 +39,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (error) {
       console.error('Error fetching profile for user:', userId, error)
+      if (error.code === 'PGRST116' || error.status === 406) {
+        await supabase.auth.signOut()
+        setUser(null)
+        setSession(null)
+        setProfile(null)
+      }
       return
     }
 

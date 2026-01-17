@@ -36,9 +36,14 @@ export function useStrikeSettings(): UseStrikeSettingsReturn {
           .select('strikes_before_cooldown, cooldown_weeks')
           .order('id', { ascending: false })
           .limit(1)
-          .single()
+          .maybeSingle()
 
-        if (!error && data) {
+        if (error) {
+          console.error('Failed to fetch strike settings:', error)
+          return
+        }
+
+        if (data) {
           setStrikeSettings(data)
         }
       } catch (err) {

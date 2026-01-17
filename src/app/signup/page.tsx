@@ -103,10 +103,14 @@ export default function SignupPage() {
 
       if (!uploadError && url) {
         // Update profile with picture URL
-        await supabase
+        const { error: profileError } = await supabase
           .from('profiles')
           .update({ profile_picture_url: url })
           .eq('id', data.user.id)
+
+        if (profileError) {
+          console.error('Profile picture update failed:', profileError)
+        }
       }
     }
 
