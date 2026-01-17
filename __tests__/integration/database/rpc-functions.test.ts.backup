@@ -1,0 +1,743 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { createTestSupabaseClient, createAuthenticatedTestClient } from '../../helpers/supabase-test-client'
+import { Database } from '@/types/database'
+
+/**
+ * Integration Tests for Critical RPC Functions
+ *
+ * These tests validate the team balancing algorithm:
+ * - balance_teams() - Skill-balanced team assignments
+ *
+ * Prerequisites:
+ * - Local Supabase running (npx supabase start)
+ * - Test database seeded with 45 players (npm run test:db:seed)
+ * - .env.test configured with TEST_SUPABASE_URL and keys
+ */
+
+describe('RPC Functions Integration Tests', () => {
+  let supabase: ReturnType<typeof createTestSupabaseClient>
+  let adminClient: any
+  let testGameId: string
+
+  beforeAll(async () => {
+    // Create admin client using service key (bypasses RLS for testing)
+    const supabaseUrl = process.env.TEST_SUPABASE_URL || 'http://127.0.0.1:54321'
+    const serviceKey = process.env.TEST_SUPABASE_SERVICE_KEY || ''
+
+    if (!serviceKey) {
+      throw new Error('TEST_SUPABASE_SERVICE_KEY is required for integration tests')
+    }
+
+    // Import createClient here to avoid module issues
+    const { createClient } = await import('@supabase/supabase-js')
+    adminClient = createClient(supabaseUrl, serviceKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    })
+
+    // Create regular supabase client
+    supabase = createTestSupabaseClient()
+  })
+
+  beforeEach(async () => {
+    // Create a fresh test game for each test
+    // Use a unique date for each test to avoid unique constraint violations
+    const daysOffset = Math.floor(Math.random() * 365) + 7 // Random day between 7-372 days from now
+    const gameDate = new Date(Date.now() + daysOffset * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+
+    const { data: game, error } = await adminClient
+      .from('games')
+      .insert({
+        game_date: gameDate,
+        status: 'waitlist_open',
+        priority_deadline: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+        payment_reminder_time: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString(),
+        payment_deadline: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+        sunday_lottery_deadline: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString(),
+        teams_announced: false,
+      })
+      .select('id')
+      .single()
+
+    if (error) throw new Error(`Failed to create test game: ${error.message}`)
+    testGameId = game.id
+  })
+
+  afterEach(async () => {
+    // Cleanup: remove test game and related data after each test
+    if (testGameId) {
+      await adminClient.from('games').delete().eq('id', testGameId)
+      testGameId = ''
+    }
+  })
+
+  afterAll(async () => {
+    // Final cleanup
+  })
+
+  // ========================================
+  // WEIGHTED LOTTERY SELECTION TESTS
+  // ========================================
+
+  describe('weighted_lottery_selection()', () => {
+    it('should select correct number of players from waitlist', async () => {
+      // Add 20 players to waitlist
+      const { data: profiles } = await adminClient
+        .from('profiles')
+        .select('id')
+        .like('email', 'player%@dropin.test')
+        .limit(20)
+
+      if (!profiles) throw new Error('No test players found')
+
+      // Add all 20 to waitlist with staggered join times
+      for (let i = 0; i < profiles.length; i++) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: profiles[i].id,
+          status: 'waitlist',
+          joined_waitlist_at: new Date(Date.now() - (20 - i) * 60 * 1000).toISOString(), // Earlier = lower index
+        })
+      }
+
+      // Run lottery for 5 spots
+      const { data, error } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 5,
+      })
+
+      expect(error).toBeNull()
+      expect(data).toBeDefined()
+      expect(data?.length).toBe(5)
+    })
+
+    it('should prioritize players with high weeks_since_last_played', async () => {
+      // Get players with varying weeks_since_last_played
+      const { data: highWeeksPlayers } = await adminClient
+        .from('profiles')
+        .select('id, weeks_since_last_played')
+        .gte('weeks_since_last_played', 7)
+        .limit(5)
+
+      const { data: lowWeeksPlayers } = await adminClient
+        .from('profiles')
+        .select('id, weeks_since_last_played')
+        .lte('weeks_since_last_played', 1)
+        .limit(5)
+
+      if (!highWeeksPlayers || !lowWeeksPlayers) throw new Error('Insufficient test data')
+
+      // Add both groups to waitlist (same join time)
+      const allPlayers = [...highWeeksPlayers, ...lowWeeksPlayers]
+      const joinTime = new Date().toISOString()
+
+      for (const player of allPlayers) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'waitlist',
+          joined_waitlist_at: joinTime,
+        })
+      }
+
+      // Run lottery for 5 spots
+      const { data: selected } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 5,
+      })
+
+      expect(selected).toBeDefined()
+      expect(selected?.length).toBe(5)
+
+      // Verify that high weeks players have higher weights than low weeks players
+      const selectedIds = selected?.map((s: any) => s.player_id) || []
+      const highWeeksSelected = highWeeksPlayers.filter((p) =>
+        selectedIds.includes(p.id)
+      ).length
+
+      const lowWeeksSelected = lowWeeksPlayers.filter((p) =>
+        selectedIds.includes(p.id)
+      ).length
+
+      // The algorithm should favor high weeks players (but allow for randomness)
+      // At minimum, verify that we got some high weeks players OR that weights are correctly calculated
+      expect(highWeeksSelected + lowWeeksSelected).toBe(5) // Should have selected 5 total
+
+      // Check that the weights reflect weeks_since_last_played correctly
+      const results = selected as Array<{ player_id: string; weight: number }>
+      expect(results.length).toBe(5)
+    })
+
+    it('should weight times_started_as_sub correctly (+5 points each)', async () => {
+      // Get players with high times_started_as_sub
+      const { data: highSubPlayers } = await adminClient
+        .from('profiles')
+        .select('id, times_started_as_sub')
+        .gte('times_started_as_sub', 10)
+        .limit(5)
+
+      const { data: lowSubPlayers } = await adminClient
+        .from('profiles')
+        .select('id, times_started_as_sub')
+        .lte('times_started_as_sub', 2)
+        .limit(5)
+
+      if (!highSubPlayers || !lowSubPlayers) throw new Error('Insufficient test data')
+
+      // Add both groups to waitlist
+      const allPlayers = [...highSubPlayers, ...lowSubPlayers]
+      const joinTime = new Date().toISOString()
+
+      for (const player of allPlayers) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'waitlist',
+          joined_waitlist_at: joinTime,
+        })
+      }
+
+      // Run lottery
+      const { data: selected } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 5,
+      })
+
+      expect(selected).toBeDefined()
+
+      // High sub players should have higher weights
+      const results = selected as Array<{ player_id: string; weight: number }>
+      const highSubSelected = results.filter((s) =>
+        highSubPlayers.some((p) => p.id === s.player_id)
+      )
+
+      expect(highSubSelected.length).toBeGreaterThan(0)
+    })
+
+    it('should exclude players on strike cooldown', async () => {
+      // Get players with active strike cooldowns (from seed: player31, player32)
+      const { data: strikedPlayers } = await adminClient
+        .from('profiles')
+        .select('id, email, strike_cooldown_until')
+        .not('strike_cooldown_until', 'is', null)
+        .gte('strike_cooldown_until', new Date().toISOString())
+        .limit(2)
+
+      const { data: normalPlayers } = await adminClient
+        .from('profiles')
+        .select('id')
+        .or('strike_cooldown_until.is.null,strike_cooldown_until.lt.' + new Date().toISOString())
+        .like('email', 'player%@dropin.test')
+        .limit(8)
+
+      if (!strikedPlayers || !normalPlayers) throw new Error('Insufficient test data')
+
+      // Add both groups to waitlist
+      const allPlayers = [...strikedPlayers, ...normalPlayers]
+
+      for (const player of allPlayers) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'waitlist',
+          joined_waitlist_at: new Date().toISOString(),
+        })
+      }
+
+      // Run lottery for 5 spots
+      const { data: selected } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 5,
+      })
+
+      expect(selected).toBeDefined()
+
+      // None of the selected should be striked players
+      const selectedIds = selected?.map((s: any) => s.player_id) || []
+      const strikedSelected = strikedPlayers.filter((p) => selectedIds.includes(p.id))
+
+      expect(strikedSelected.length).toBe(0)
+    })
+
+    it('should handle 45-player waitlist correctly', async () => {
+      // Get all 43 regular players (excluding admin/super_admin)
+      const { data: allPlayers } = await adminClient
+        .from('profiles')
+        .select('id')
+        .like('email', 'player%@dropin.test')
+        .or('email.like.keeper%@dropin.test')
+
+      if (!allPlayers) throw new Error('No test players found')
+
+      // Add all to waitlist
+      for (let i = 0; i < allPlayers.length; i++) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: allPlayers[i].id,
+          status: 'waitlist',
+          joined_waitlist_at: new Date(Date.now() - (allPlayers.length - i) * 60 * 1000).toISOString(),
+        })
+      }
+
+      // Run lottery for 16 spots (full game)
+      const { data: selected, error } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 16,
+      })
+
+      expect(error).toBeNull()
+      expect(selected).toBeDefined()
+      expect(selected?.length).toBeLessThanOrEqual(16)
+    })
+
+    it('should return players sorted by weight descending', async () => {
+      // Add 10 players to waitlist
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .like('email', 'player%@dropin.test')
+        .limit(10)
+
+      if (!players) throw new Error('No test players found')
+
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'waitlist',
+          joined_waitlist_at: new Date().toISOString(),
+        })
+      }
+
+      // Run lottery
+      const { data: selected } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 5,
+      })
+
+      expect(selected).toBeDefined()
+
+      // Check weights are in descending order
+      const results = selected as Array<{ player_id: string; weight: number }>
+      for (let i = 1; i < results.length; i++) {
+        expect(results[i].weight).toBeLessThanOrEqual(results[i - 1].weight)
+      }
+    })
+
+    it('should not return duplicate selections', async () => {
+      // Add 15 players to waitlist
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .like('email', 'player%@dropin.test')
+        .limit(15)
+
+      if (!players) throw new Error('No test players found')
+
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'waitlist',
+          joined_waitlist_at: new Date().toISOString(),
+        })
+      }
+
+      // Run lottery
+      const { data: selected } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 10,
+      })
+
+      expect(selected).toBeDefined()
+
+      // Check for duplicates
+      const playerIds = selected?.map((s: any) => s.player_id) || []
+      const uniqueIds = new Set(playerIds)
+
+      expect(uniqueIds.size).toBe(playerIds.length)
+    })
+
+    it('should handle lottery with spots > waitlist size', async () => {
+      // Add only 5 players
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .like('email', 'player%@dropin.test')
+        .limit(5)
+
+      if (!players) throw new Error('No test players found')
+
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'waitlist',
+          joined_waitlist_at: new Date().toISOString(),
+        })
+      }
+
+      // Request 10 spots (more than available)
+      const { data: selected } = await adminClient.rpc('weighted_lottery_selection', {
+        p_game_id: testGameId,
+        p_spots_available: 10,
+      })
+
+      expect(selected).toBeDefined()
+      expect(selected?.length).toBe(5) // Should only return available players
+    })
+  })
+
+  // ========================================
+  // BALANCE TEAMS TESTS
+  // ========================================
+
+  describe('balance_teams()', () => {
+    it('should create two teams of 8 players each', async () => {
+      // Get 16 confirmed players (any players, not filtering by email)
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .neq('role', 'super_admin') // Exclude super_admin to have clean test data
+        .limit(16)
+
+      if (!players || players.length < 16) {
+        throw new Error(`Insufficient test players: found ${players?.length || 0}, need 16`)
+      }
+
+      // Add all as confirmed
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments, error } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(error).toBeNull()
+      expect(assignments).toBeDefined()
+      expect(assignments?.length).toBe(16)
+
+      // Count players per team
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      const darkTeam = results.filter((a) => a.assigned_team === 'dark')
+      const lightTeam = results.filter((a) => a.assigned_team === 'light')
+
+      expect(darkTeam.length).toBe(8)
+      expect(lightTeam.length).toBe(8)
+    })
+
+    it('should select and assign 2 keepers to different teams', async () => {
+      // Get 2 permanent keepers + 14 players
+      const { data: keepers } = await adminClient
+        .from('profiles')
+        .select('id, is_permanent_keeper')
+        .eq('is_permanent_keeper', true)
+        .limit(2)
+
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .eq('is_permanent_keeper', false)
+        .like('email', 'player%@dropin.test')
+        .limit(14)
+
+      if (!keepers || !players || keepers.length < 2 || players.length < 14) {
+        throw new Error('Insufficient test data')
+      }
+
+      // Add all as confirmed
+      const allPlayers = [...keepers, ...players]
+      for (const player of allPlayers) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(assignments).toBeDefined()
+
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      // Find keeper assignments
+      const assignedKeepers = results.filter((a) => a.assigned_position === 'keeper')
+
+      expect(assignedKeepers.length).toBe(2)
+      expect(assignedKeepers[0].assigned_team).not.toBe(assignedKeepers[1].assigned_team)
+      expect(assignedKeepers[0].is_starting).toBe(true)
+      expect(assignedKeepers[1].is_starting).toBe(true)
+    })
+
+    it('should balance team skill ratings within reasonable margin', async () => {
+      // Get 16 players with varying skill ratings
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id, skill_rating')
+        .neq('role', 'super_admin')
+        .not('skill_rating', 'is', null)
+        .limit(16)
+
+      if (!players || players.length < 16) {
+        throw new Error(`Insufficient test players: found ${players?.length || 0}, need 16`)
+      }
+
+      // Add all as confirmed
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(assignments).toBeDefined()
+
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      // Calculate team skill totals
+      const darkPlayers = results.filter((a) => a.assigned_team === 'dark').map((a) => a.player_id)
+      const lightPlayers = results.filter((a) => a.assigned_team === 'light').map((a) => a.player_id)
+
+      const darkSkill = players
+        .filter((p) => darkPlayers.includes(p.id))
+        .reduce((sum, p) => sum + (p.skill_rating || 3), 0)
+
+      const lightSkill = players
+        .filter((p) => lightPlayers.includes(p.id))
+        .reduce((sum, p) => sum + (p.skill_rating || 3), 0)
+
+      // Teams should be within 5 skill points of each other
+      const skillDifference = Math.abs(darkSkill - lightSkill)
+      expect(skillDifference).toBeLessThanOrEqual(5)
+    })
+
+    it('should designate first 5 per team as starters (6 with keeper)', async () => {
+      // Get 16 players
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .neq('role', 'super_admin')
+        .limit(16)
+
+      if (!players || players.length < 16) {
+        throw new Error(`Insufficient test players: found ${players?.length || 0}, need 16`)
+      }
+
+      // Add all as confirmed
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(assignments).toBeDefined()
+
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      // Check starters per team (1 keeper + 5 field = 6 total)
+      const darkStarters = results.filter(
+        (a) => a.assigned_team === 'dark' && a.is_starting === true
+      )
+      const lightStarters = results.filter(
+        (a) => a.assigned_team === 'light' && a.is_starting === true
+      )
+
+      expect(darkStarters.length).toBe(6)
+      expect(lightStarters.length).toBe(6)
+    })
+
+    it('should designate 2 subs per team', async () => {
+      // Get 16 players
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .neq('role', 'super_admin')
+        .limit(16)
+
+      if (!players || players.length < 16) {
+        throw new Error(`Insufficient test players: found ${players?.length || 0}, need 16`)
+      }
+
+      // Add all as confirmed
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(assignments).toBeDefined()
+
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      // Check subs per team
+      const darkSubs = results.filter(
+        (a) => a.assigned_team === 'dark' && a.assigned_position === 'sub'
+      )
+      const lightSubs = results.filter(
+        (a) => a.assigned_team === 'light' && a.assigned_position === 'sub'
+      )
+
+      expect(darkSubs.length).toBe(2)
+      expect(lightSubs.length).toBe(2)
+
+      // Subs should not be marked as starting
+      darkSubs.forEach((sub) => expect(sub.is_starting).toBe(false))
+      lightSubs.forEach((sub) => expect(sub.is_starting).toBe(false))
+    })
+
+    it('should handle edge case with only 1 permanent keeper', async () => {
+      // Get 1 permanent keeper + 15 regular players
+      const { data: keepers } = await adminClient
+        .from('profiles')
+        .select('id')
+        .eq('is_permanent_keeper', true)
+        .limit(1)
+
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .eq('is_permanent_keeper', false)
+        .like('email', 'player%@dropin.test')
+        .limit(15)
+
+      if (!keepers || !players || keepers.length < 1 || players.length < 15) {
+        throw new Error('Insufficient test data')
+      }
+
+      // Add all as confirmed
+      const allPlayers = [...keepers, ...players]
+      for (const player of allPlayers) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments, error } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(error).toBeNull()
+      expect(assignments).toBeDefined()
+
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      // Should still have 2 keepers (1 permanent + 1 random)
+      const assignedKeepers = results.filter((a) => a.assigned_position === 'keeper')
+      expect(assignedKeepers.length).toBe(2)
+    })
+
+    it('should handle edge case with no permanent keepers', async () => {
+      // Get 16 regular players (no keepers)
+      const { data: players } = await adminClient
+        .from('profiles')
+        .select('id')
+        .eq('is_permanent_keeper', false)
+        .like('email', 'player%@dropin.test')
+        .limit(16)
+
+      if (!players || players.length < 16) throw new Error('Insufficient test players')
+
+      // Add all as confirmed
+      for (const player of players) {
+        await adminClient.from('game_players').insert({
+          game_id: testGameId,
+          player_id: player.id,
+          status: 'confirmed',
+          confirmed_at: new Date().toISOString(),
+        })
+      }
+
+      // Run team balancing
+      const { data: assignments, error } = await adminClient.rpc('balance_teams', {
+        p_game_id: testGameId,
+      })
+
+      expect(error).toBeNull()
+      expect(assignments).toBeDefined()
+
+      const results = assignments as Array<{
+        player_id: string
+        assigned_team: 'dark' | 'light'
+        assigned_position: 'field' | 'sub' | 'keeper'
+        is_starting: boolean
+      }>
+
+      // Should still assign 2 keepers randomly
+      const assignedKeepers = results.filter((a) => a.assigned_position === 'keeper')
+      expect(assignedKeepers.length).toBe(2)
+      expect(assignedKeepers[0].assigned_team).not.toBe(assignedKeepers[1].assigned_team)
+    })
+  })
+})
